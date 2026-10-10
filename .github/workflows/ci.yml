@@ -1,0 +1,113 @@
+
+name: Lab 14 CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}/lab14-app
+
+jobs:
+  build:
+    name: Build and Publish Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Read application version
+        id: version
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  test:
+    name: Test Application
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build -t lab14-app:test .
+
+      - name: Start application
+        run: |
+          docker run -d --name lab14-test \
+            -p 127.0.0.1:8080:8080 \
+            -e APP_VERSION="$(cat VERSION)" \
+            -e APP_ENV=test \
+            lab14-app:test
+
+      - name: Test endpoints
+        run: |
+          for i in $(seq 1 15); do
+            if curl --fail --silent http://127.0.0.1:8080/health; then
+              break
+            fi
+            sleep 2
+          done
+
+          curl --fail --silent http://127.0.0.1:8080/health
+          curl --fail --silent http://127.0.0.1:8080/ | grep -F '"name":"Lab14 CI/CD Application"'
+
+      - name: Clean up test container
+        if: always()
+        run: docker rm -f lab14-test || true
+
+  security-scan:
+    name: Scan Container Image
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Build image for scanning
+        run: docker build -t lab14-app:scan .
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.4
+        with:
+          version: latest
+
+      - name: Generate vulnerability report
+        run: |
+          trivy image --format table --output trivy-report.txt lab14-app:scan
+          trivy image --format json --output trivy-report.json lab14-app:scan
+
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-security-report
+          path: |
+            trivy-report.txt
+            trivy-report.json
