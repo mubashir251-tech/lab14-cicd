@@ -1,0 +1,7 @@
+.git
+.gitlab
+__pycache__
+*.pyc
+.env
+.venv
+trivy*.json
